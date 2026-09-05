@@ -1,0 +1,117 @@
+[project]
+name = "refract-llm"
+version = "0.3.2.3"
+description = "REFRACT — Reference-anchored Robust Acid-test for Compressed Transformers. Multi-axis KV-cache fidelity scoring for LLMs across llama.cpp, MLX, vLLM, and SGLang."
+readme = "refract/README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Tom Turney (TheTom)" },
+]
+keywords = [
+    "llm",
+    "kv-cache",
+    "quantization",
+    "evaluation",
+    "fidelity",
+    "llama-cpp",
+    "mlx",
+    "vllm",
+    "sglang",
+    "perplexity",
+    "kld",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# REFRACT itself has zero non-stdlib runtime deps for the framework — kept
+# that way deliberately so `pip install refract-llm` is small and doesn't
+# pull torch / transformers / vllm by default. Backend extras opt into
+# their own dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+# Apple Silicon (Metal). MLX backend uses native Python — no patches needed.
+refract-mlx = [
+    "mlx>=0.20",
+    "mlx-lm>=0.31",  # qwen3.5 + gemma-4 support requires 0.31+
+]
+# CUDA / ROCm. vLLM backend uses an in-process LLM via vllm.LLM.
+# Caches one LLM at a time and evicts on KV-config change so hybrid models
+# (Qwen3.6-35B-A3B etc.) that don't fit two simultaneous instances can
+# still be scored.
+refract-vllm = [
+    "vllm>=0.5",
+]
+# SGLang backend is HTTP-based; the user runs the SGLang server separately
+# (typically via the published Docker image). REFRACT only needs a HTTP
+# client and a tokenizer to construct prompt token IDs.
+refract-sglang = [
+    "requests>=2.28",
+    "transformers>=4.40",
+]
+# Convenience: install all backend extras at once.
+full = [
+    "mlx>=0.20",
+    "mlx-lm>=0.31",
+    "vllm>=0.5",
+    "requests>=2.28",
+    "transformers>=4.40",
+]
+# Development.
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "coverage>=7.0",
+    "build>=1.0",
+    "twine>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/TheTom/turboquant_plus/tree/main/refract"
+Repository = "https://github.com/TheTom/turboquant_plus"
+Issues = "https://github.com/TheTom/turboquant_plus/issues"
+Changelog = "https://github.com/TheTom/turboquant_plus/blob/main/refract/CHANGELOG.md"
+"Cross-engine bench" = "https://github.com/TheTom/turboquant_plus/blob/main/docs/papers/cross-engine-mi300x.md"
+
+[project.scripts]
+refract = "refract.cli:main"
+
+[tool.setuptools.packages.find]
+# Only ship the refract framework. The `turboquant` Python package in the
+# same repo is dev-only (TurboQuant kernels research workspace) and is NOT
+# part of this wheel.
+include = ["refract*"]
+
+[tool.setuptools.package-data]
+# Ship prompts, llama.cpp patches, and example reports inside the wheel so
+# users can run REFRACT immediately and apply the trajectory patch to their
+# own llama.cpp build without cloning the source repo.
+refract = [
+    "prompts/*.jsonl",
+    "examples/*.json",
+    "examples/*.html",
+    "examples/*.md",
+    "llama-cpp-patches/*.patch",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# Refract's tests are the ones gating wheel releases.
+testpaths = ["refract/tests"]

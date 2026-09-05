@@ -1,0 +1,12 @@
+--- src/llama-context.cpp
++++ src/llama-context.cpp
+@@ -2401,6 +2401,9 @@
+ ggml_cgraph * llama_context::graph_reserve(
+         uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only, size_t * sizes) {
+     LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
++    if (n_outputs < 1) {
++        fprintf(stderr, "DEBUG_CRASH: n_tokens=%u n_seqs=%u n_outputs=%u cparams.n_ctx=%u cparams.n_outputs_max=%u cparams.n_outputs_max_per_seq=%u cparams.n_ubatch=%u\n", n_tokens, n_seqs, n_outputs, cparams.n_ctx, cparams.n_outputs_max, cparams.n_outputs_max_per_seq, cparams.n_ubatch);
++    }
+     GGML_ASSERT(n_outputs >= 1);
+ 
+     if (n_tokens % n_seqs != 0) {

@@ -1,0 +1,11 @@
+--- common/common.cpp
++++ common/common.cpp
+@@ -1289,6 +1289,8 @@
+         int32_t n_embd_head_k = n_head > 0 ? n_embd / n_head : 128;
+         // 2 (K and V) * fp16 size
+         size_t bytes_per_token = 2 * (size_t)n_layer * n_head_kv * n_embd_head_k * 2;
++        
++        fprintf(stderr, "DEBUG_COMMON: params.kv_swap_size=%zu params.kv_swap_ram=%zu max_bytes=%zu bytes_per_token=%zu\n", params.kv_swap_size, params.kv_swap_ram, max_bytes, bytes_per_token);
+ 
+         if (bytes_per_token > 0 && max_bytes > 0) {
+             cparams.n_ctx = max_bytes / bytes_per_token;

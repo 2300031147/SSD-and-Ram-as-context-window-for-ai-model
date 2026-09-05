@@ -1,0 +1,250 @@
+
+            res->reset();
+
+            auto * gf = build_graph_shift(res, lctx);
+            if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+                LLAMA_LOG_ERROR("%s: failed to allocate compute graph for K-shift\n", __func__);
+                return updated;
+            }
+
+            res->set_inputs(nullptr);
+
+// MISSING LINE 901
+// MISSING LINE 902
+// MISSING LINE 903
+// MISSING LINE 904
+// MISSING LINE 905
+// MISSING LINE 906
+// MISSING LINE 907
+// MISSING LINE 908
+// MISSING LINE 909
+// MISSING LINE 910
+// MISSING LINE 911
+// MISSING LINE 912
+// MISSING LINE 913
+// MISSING LINE 914
+// MISSING LINE 915
+// MISSING LINE 916
+// MISSING LINE 917
+// MISSING LINE 918
+// MISSING LINE 919
+// MISSING LINE 920
+// MISSING LINE 921
+// MISSING LINE 922
+// MISSING LINE 923
+// MISSING LINE 924
+// MISSING LINE 925
+// MISSING LINE 926
+// MISSING LINE 927
+// MISSING LINE 928
+// MISSING LINE 929
+// MISSING LINE 930
+// MISSING LINE 931
+// MISSING LINE 932
+// MISSING LINE 933
+// MISSING LINE 934
+// MISSING LINE 935
+// MISSING LINE 936
+// MISSING LINE 937
+// MISSING LINE 938
+// MISSING LINE 939
+// MISSING LINE 940
+// MISSING LINE 941
+// MISSING LINE 942
+// MISSING LINE 943
+// MISSING LINE 944
+// MISSING LINE 945
+// MISSING LINE 946
+// MISSING LINE 947
+// MISSING LINE 948
+// MISSING LINE 949
+                        ss += '\n';
+                    }
+                }
+                LLAMA_LOG_DEBUG("\n%s\n", ss.c_str());
+            }
+
+            for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
+                if (cells.seq_pos_min(s) < 0) {
+                    continue;
+                }
+
+                LLAMA_LOG_DEBUG("%s: stream[%d] min[%d] = %5d, max[%d] = %5d\n", __func__, stream_id, s, cells.seq_pos_min(s), s, cells.seq_pos_max(s));
+            }
+        }
+    }
+
+    uint32_t n_tokens = ubatch.n_tokens;
+    uint32_t n_seqs   = 1;
+
+    if (n_stream > 1) {
+        GGML_ASSERT(n_tokens % ubatch.n_seqs_unq == 0);
+
+        n_seqs   = ubatch.n_seqs_unq;
+        n_tokens = n_tokens / n_seqs;
+    }
+
+    slot_info res = {
+        /*.s0   =*/ LLAMA_MAX_SEQ,
+        /*.s1   =*/ 0,
+        /*.strm =*/ { },
+        /*.idxs =*/ { },
+    };
+
+    res.resize(n_seqs);
+
+    for (uint32_t s = 0; s < n_seqs; ++s) {
+        const auto seq_id = ubatch.seq_id_unq[s];
+
+        if (n_stream > 1) {
+            GGML_ASSERT(ubatch.n_seq_id[s*n_tokens]    == 1);
+            GGML_ASSERT(ubatch.seq_id  [s*n_tokens][0] == seq_id);
+        }
+
+        res.s0 = std::min<uint32_t>(res.s0, seq_to_stream[seq_id]);
+        res.s1 = std::max<uint32_t>(res.s1, seq_to_stream[seq_id]);
+
+        res.strm[s] = seq_to_stream[seq_id];
+        res.idxs[s].reserve(n_tokens);
+
+        const auto & cells = v_cells[seq_to_stream[seq_id]];
+
+        uint32_t head_cur = v_heads[seq_to_stream[seq_id]];
+
+        // start searching from current head
+        if (head_cur > cells.get_used() + 2*n_tokens) {
+            head_cur = 0;
+        }
+
+        if (n_tokens > cells.size()) {
+            LLAMA_LOG_ERROR("%s: n_tokens = %d > size = %u\n", __func__, n_tokens, cells.size());
+            return { };
+        }
+
+        uint32_t n_tested = 0;
+
+        // for continuous slots, we test that all tokens in the ubatch fit, starting from the current head
+        // for non-continuous slots, we test the tokens one by one
+        const uint32_t n_test = cont ? n_tokens : 1;
+
+        while (true) {
+            if (head_cur + n_test > cells.size()) {
+                n_tested += cells.size() - head_cur;
+                head_cur = 0;
+                continue;
+            }
+
+            for (uint32_t i = 0; i < n_test; i++) {
+                const auto idx = head_cur;
+
+                head_cur++;
+                n_tested++;
+
+                //const llama_pos    pos    = ubatch.pos[i];
+                //const llama_seq_id seq_id = ubatch.seq_id[i][0];
+
+                // can we use this cell? either:
+                //  - the cell is empty
+                //  - the cell is occupied only by one sequence:
+                //    - (disabled) mask causally, if the sequence is the same as the one we are inserting
+                //    - mask SWA, using current max pos for that sequence in the cache
+                //                always insert in the cell with minimum pos
+                bool can_use = cells.is_empty(idx);
+
+                if (!can_use && cells.seq_count(idx) == 1) {
+                    const llama_pos pos_cell = cells.pos_get(idx);
+
+                    // (disabled) causal mask
+                    // note: it's better to purge any "future" tokens beforehand
+                    //if (cells.seq_has(idx, seq_id)) {
+                    //    can_use = pos_cell >= pos;
+                    //}
+
+                    if (!can_use) {
+                        const llama_seq_id seq_id_cell = cells.seq_get(idx);
+
+                        // SWA mask
+                        if (llama_hparams::is_masked_swa(n_swa, swa_type, pos_cell, cells.seq_pos_max(seq_id_cell) + 1)) {
+                            can_use = true;
+                        }
+                    }
+                }
+
+                if (can_use) {
+                    res.idxs[s].push_back(idx);
+                } else {
+                    if (cont) {
+                        break;
+                    }
+                }
+            }
+
+            if (res.idxs[s].size() == n_tokens) {
+                break;
+            }
+
+            if (cont) {
+                res.idxs[s].clear();
+            }
+
+            if (n_tested >= cells.size()) {
+                if (swap_mgr) {
+                    std::vector<ggml_tensor *> k_tensors;
+                    std::vector<ggml_tensor *> v_tensors;
+                    for (const auto & l : layers) {
+                        k_tensors.push_back(l.k_stream[seq_to_stream[seq_id]]);
+                        v_tensors.push_back(l.v_stream[seq_to_stream[seq_id]]);
+                    }
+                    auto & cells_mut = const_cast<llama_kv_cells &>(v_cells[seq_to_stream[seq_id]]);
+                    bool any_evicted = false;
+                    uint32_t evicted_tokens = 0;
+                    const uint32_t needed_tokens = (cells_mut.get_used() + n_tokens > cells_mut.size()) ?
+                                                   (cells_mut.get_used() + n_tokens - cells_mut.size()) : n_tokens;
+
+                    while (evicted_tokens < needed_tokens) {
+                        llama_kv_block_meta evicted;
+                        if (!swap_mgr->evict_lru_block(k_tensors, v_tensors, seq_to_stream[seq_id], evicted)) {
+                            break;
+                        }
+                        for (uint32_t c = evicted.cell_start; c < evicted.cell_start + evicted.id.n_tokens && c < cells_mut.size(); ++c) {
+                            if (cells_mut.seq_has(c, evicted.id.seq_id)) {
+                res.idxs[s].clear();
+            }
+
+            if (n_tested >= cells.size()) {
+                if (swap_mgr) {
+                    std::vector<ggml_tensor *> k_tensors;
+                    std::vector<ggml_tensor *> v_tensors;
+                    for (const auto & l : layers) {
+                        k_tensors.push_back(l.k_stream[seq_to_stream[seq_id]]);
+                        v_tensors.push_back(l.v_stream[seq_to_stream[seq_id]]);
+                    }
+                    auto & cells_mut = const_cast<llama_kv_cells &>(v_cells[seq_to_stream[seq_id]]);
+                    bool any_evicted = false;
+                    uint32_t evicted_tokens = 0;
+                    const uint32_t needed_tokens = (cells_mut.get_used() + n_tokens > cells_mut.size()) ?
+                                                   (cells_mut.get_used() + n_tokens - cells_mut.size()) : n_tokens;
+
+                    while (evicted_tokens < needed_tokens) {
+                        llama_kv_block_meta evicted;
+                        if (!swap_mgr->evict_lru_block(k_tensors, v_tensors, seq_to_stream[seq_id], evicted, seq_id)) {
+                            break;
+                        }
+                        for (uint32_t c = evicted.cell_start; c < evicted.cell_start + evicted.id.n_tokens && c < cells_mut.size(); ++c) {
+                            if (cells_mut.seq_has(c, evicted.id.seq_id)) {
+                                cells_mut.seq_rm(c, evicted.id.seq_id);
+                            }
+                        }
+                        evicted_tokens += evicted.id.n_tokens;
+                        any_evicted = true;
+                    }
+
+                    if (any_evicted) {
+                        res.idxs[s].clear();
+                        n_tested = 0;
+                        head_cur = 0;
+                        continue;
+            }
+        }
+
+        // we didn't find a suitable slot - return empty result

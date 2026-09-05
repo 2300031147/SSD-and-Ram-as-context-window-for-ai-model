@@ -1,0 +1,23 @@
+Actually, the user expects that the server "thinks all this was space i can use to fill".
+When starting llama-cli, the user specifies context size with `-c N`. The KV cache reserves `N` tokens in VRAM by default. If it doesn't fit, `llama.cpp` will usually fallback to RAM (using unified memory or just allocating on CPU backend). But `llama_kv_tiered_manager` allows explicitly moving blocks that don't fit into a swap file.
+If the user wants RAM to be an explicit tier, we can add a new parameter `--kv-swap-ram-size` or dynamically allocate WARM_RAM buffers in system RAM up to a certain limit or until system memory pressure is high. 
+
+Wait, the user's specific text: "tensor have have to see these ram as a secondary and ssd as a third cache then only it will work effienctly and well but the model and server have to think all this was space i can use to fill and it accorddingly but they will differnt speed so "
+
+Let's modify `llama_kv_tiered_manager` to support `WARM_RAM`.
+1. In `llama_kv_swap.h`, add `size_t max_ram_bytes;` to the tiered manager and `size_t used_ram_bytes = 0;`.
+2. Add `std::unordered_map<llama_kv_block_id, void*, llama_kv_block_id_hash> ram_blocks;` to store the blocks residing in RAM.
+3. In `evict_lru_block`:
+    Instead of writing directly to `store` (SSD), check if we can fit the block in `WARM_RAM` (`used_ram_bytes + block_bytes <= max_ram_bytes`).
+    If yes, allocate a buffer in RAM (using `malloc`), copy the packed `io_buffer` data to this RAM buffer, update `meta.loc = WARM_RAM`, and add to `ram_blocks`.
+    If no (RAM is full), we first need to evict an LRU block from `WARM_RAM` to `COLD_SSD`.
+    Wait, `evict_lru_block` evicts from `HOT_VRAM`. So we take the `HOT_VRAM` block, pack it into `io_buffer`. 
+    Then we look for a victim in `WARM_RAM` to move to `COLD_SSD`, to make space.
+    Wait, we can just maintain a separate LRU list for `WARM_RAM` or traverse the global `lru_list` backwards to find the oldest `WARM_RAM` block and move it to `COLD_SSD`.
+    Let's traverse the global `lru_list` from the oldest (`rbegin`). If we find a `WARM_RAM` block, we write its RAM buffer to `store`, free the RAM buffer, update its `loc` to `COLD_SSD`, and now we have space in `WARM_RAM`. Then we put the new `HOT_VRAM` block into `WARM_RAM`.
+
+4. In `swap_in_block`:
+    If `loc == WARM_RAM`, we copy from the RAM buffer back into `HOT_VRAM`, free the RAM buffer, and update `used_ram_bytes`.
+    If `loc == COLD_SSD`, we read from `store` (as currently done) into `HOT_VRAM` and free the SSD slot.
+
+5. When `blocks` are deleted (e.g. `remove_seq`), if a block is in `WARM_RAM`, we must free its RAM buffer.
