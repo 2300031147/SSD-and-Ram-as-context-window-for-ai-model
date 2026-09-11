@@ -33,6 +33,12 @@
 #   define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#else
+#include <unistd.h>
 #endif
 
 using json = nlohmann::ordered_json;
@@ -4651,6 +4657,40 @@ static json get_res_props(const server_context_meta & meta, const common_params 
     props["kv_swap_path"]    = params.kv_swap_path;
     props["kv_swap_size_gb"] = (double) params.kv_swap_size / (1024.0 * 1024.0 * 1024.0);
     props["kv_swap_ram_size_gb"] = (double) params.kv_swap_ram / (1024.0 * 1024.0 * 1024.0);
+
+    // system memory info for unified RAM safety
+    props["model_size_gb"] = (double) meta.model_size / (1024.0 * 1024.0 * 1024.0);
+
+    // detect discrete GPU
+    bool has_dgpu = false;
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            has_dgpu = true;
+            break;
+        }
+    }
+    props["has_discrete_gpu"] = has_dgpu;
+
+    // total system RAM
+#if defined(__linux__)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    double total_ram_gb = ((double)pages * (double)page_size) / (1024.0 * 1024.0 * 1024.0);
+#elif defined(__APPLE__)
+    int64_t memsize = 0;
+    size_t len = sizeof(memsize);
+    sysctlbyname("hw.memsize", &memsize, &len, NULL, 0);
+    double total_ram_gb = (double)memsize / (1024.0 * 1024.0 * 1024.0);
+#elif defined(_WIN32)
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+    GlobalMemoryStatusEx(&statex);
+    double total_ram_gb = (double)statex.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+#else
+    double total_ram_gb = 0.0;
+#endif
+    props["total_system_ram_gb"] = total_ram_gb;
 
     if (params.use_jinja) {
         if (!tmpl_tools.empty()) {

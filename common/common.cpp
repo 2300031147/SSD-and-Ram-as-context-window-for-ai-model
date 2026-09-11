@@ -44,6 +44,10 @@
 #include <string.h>
 #include <fcntl.h>
 #include <io.h>
+#elif defined(__APPLE__)
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 #else
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -1308,6 +1312,60 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
     if (model == NULL) {
         return;
+    }
+
+    // Safety cap for unified memory systems (or to prevent general over-allocation)
+    if (params.kv_swap_ram > 0) {
+        uint64_t total_ram_bytes = 0;
+#if defined(__linux__)
+        long pages = sysconf(_SC_PHYS_PAGES);
+        long page_size = sysconf(_SC_PAGE_SIZE);
+        total_ram_bytes = (uint64_t)pages * (uint64_t)page_size;
+#elif defined(__APPLE__)
+        int64_t memsize = 0;
+        size_t len = sizeof(memsize);
+        sysctlbyname("hw.memsize", &memsize, &len, NULL, 0);
+        total_ram_bytes = (uint64_t)memsize;
+#elif defined(_WIN32)
+        MEMORYSTATUSEX statex;
+        statex.dwLength = sizeof(statex);
+        GlobalMemoryStatusEx(&statex);
+        total_ram_bytes = statex.ullTotalPhys;
+#endif
+        if (total_ram_bytes > 0) {
+            uint64_t model_size = llama_model_size(model);
+            uint64_t os_reserve = 2ULL * 1024 * 1024 * 1024; // 2 GB minimum reserve
+            
+            // If we are offloading to a discrete GPU (non-Apple with n_gpu_layers > 0),
+            // the model resides largely in VRAM, not system RAM.
+            uint64_t ram_consumed_by_model = model_size;
+#if !defined(__APPLE__)
+            if (params.n_gpu_layers > 0) {
+                int32_t n_layer = llama_model_n_layer(model);
+                if (n_layer > 0) {
+                    double vram_fraction = (double)std::min(params.n_gpu_layers, n_layer) / n_layer;
+                    ram_consumed_by_model = (uint64_t)((double)model_size * (1.0 - vram_fraction));
+                } else {
+                    ram_consumed_by_model = 0; // Fallback
+                }
+            }
+#endif
+
+            uint64_t safe_ram = 0;
+            if (total_ram_bytes > (ram_consumed_by_model + os_reserve)) {
+                safe_ram = total_ram_bytes - ram_consumed_by_model - os_reserve;
+            }
+            if (params.kv_swap_ram > safe_ram) {
+                if (params.kv_swap_ram != SIZE_MAX) {
+                    COM_WRN("Requested KV RAM swap (%" PRIu64 " bytes) exceeds safe available memory (Total: %" PRIu64 ", Model in RAM: %" PRIu64 "). Capping to %" PRIu64 " bytes.\n",
+                            params.kv_swap_ram, total_ram_bytes, ram_consumed_by_model, safe_ram);
+                }
+                params.kv_swap_ram = safe_ram;
+            }
+        } else if (params.kv_swap_ram == SIZE_MAX) {
+            // Unknown OS or failed to get RAM, fallback to safe 10MB
+            params.kv_swap_ram = 10 * 1024 * 1024;
+        }
     }
 
     if (params.n_ctx == -1) {

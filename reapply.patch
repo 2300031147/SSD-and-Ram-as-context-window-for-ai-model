@@ -1,0 +1,93 @@
+--- a/src/llama-kv-swap.cpp
++++ b/src/llama-kv-swap.cpp
+@@ -267,6 +267,27 @@
+     return true;
+ }
+ 
++static void * llama_kv_swap_aligned_malloc(size_t size) {
++#if defined(_WIN32)
++    return _aligned_malloc(size, LLAMA_KV_SWAP_PAGE_ALIGNMENT);
++#else
++    void * ptr = nullptr;
++    if (posix_memalign(&ptr, LLAMA_KV_SWAP_PAGE_ALIGNMENT, size) == 0) {
++        return ptr;
++    }
++    return nullptr;
++#endif
++}
++
++static void llama_kv_swap_aligned_free(void * ptr) {
++    if (!ptr) return;
++#if defined(_WIN32)
++    _aligned_free(ptr);
++#else
++    free(ptr);
++#endif
++}
++
+ llama_kv_swap_store::llama_kv_swap_store(
+         const std::string & path,
+         size_t max_swap_size,
+@@ -643,7 +664,7 @@
+                     write_ok = store->write_block((uint64_t) warm_slot, warm_meta.ram_ptr, block_bytes);
+                 }
+                 if (write_ok) {
+-                    free(warm_meta.ram_ptr);
++                    llama_kv_swap_aligned_free(warm_meta.ram_ptr);
+                     warm_meta.ram_ptr = nullptr;
+                     used_ram_bytes -= block_bytes;
+                     warm_meta.loc = llama_kv_block_loc::COLD_SSD;
+@@ -664,7 +685,7 @@
+ 
+     for (auto & pair : blocks) {
+         if (pair.second.loc == llama_kv_block_loc::WARM_RAM && pair.second.ram_ptr) {
+-            free(pair.second.ram_ptr);
++            llama_kv_swap_aligned_free(pair.second.ram_ptr);
+             pair.second.ram_ptr = nullptr;
+         }
+     }
+@@ -1144,7 +1165,7 @@
+     // WARM_RAM Tiering Logic
+     if (used_ram_bytes + block_bytes <= max_ram_bytes) {
+         // Fits in RAM, allocate and store
+-        meta.ram_ptr = malloc(block_bytes);
++        meta.ram_ptr = llama_kv_swap_aligned_malloc(block_bytes);
+         if (!meta.ram_ptr) {
+             fprintf(stderr, "%s: failed to allocate WARM_RAM buffer\n", __func__);
+             return false;
+@@ -1175,7 +1196,7 @@
+                 return false;
+             }
+             
+-            free(warm_meta.ram_ptr);
++            llama_kv_swap_aligned_free(warm_meta.ram_ptr);
+             warm_meta.ram_ptr = nullptr;
+             used_ram_bytes -= block_bytes;
+             
+@@ -1186,7 +1207,7 @@
+             warm_ram_list.pop_back();
+             
+             // Now space is available, store the newly evicted block in WARM_RAM
+-            meta.ram_ptr = malloc(block_bytes);
++            meta.ram_ptr = llama_kv_swap_aligned_malloc(block_bytes);
+             if (!meta.ram_ptr) {
+                 return false;
+             }
+@@ -1745,7 +1766,7 @@
+             } else if (meta.loc == llama_kv_block_loc::WARM_RAM) {
+                 if (meta.ram_ptr) {
+                     if (used_ram_bytes + block_bytes <= max_ram_bytes) {
+-                        void * new_ram = malloc(block_bytes);
++                        void * new_ram = llama_kv_swap_aligned_malloc(block_bytes);
+                         if (new_ram) {
+                             memcpy(new_ram, meta.ram_ptr, block_bytes);
+                             meta.ram_ptr = new_ram;
+@@ -1948,7 +1969,7 @@
+     // Cleanly free existing warm RAM and reset all block state
+     for (auto & kv : blocks) {
+         if (kv.second.loc == llama_kv_block_loc::WARM_RAM && kv.second.ram_ptr) {
+-            free(kv.second.ram_ptr);
++            llama_kv_swap_aligned_free(kv.second.ram_ptr);
+             kv.second.ram_ptr = nullptr;
+         }
+     }

@@ -43,7 +43,7 @@
 </script>
 
 {#each fields as field (field.key)}
-	{#if !field.dependsOn || Boolean(localConfig[field.dependsOn])}
+	{#if (!field.dependsOn || Boolean(localConfig[field.dependsOn])) && (field.key !== SETTINGS_KEYS.KV_SWAP_RAM_SIZE_GB || serverStore.props?.has_discrete_gpu !== false)}
 		<div class={field.dependsOn ? 'space-y-2 pl-6' : 'space-y-2'}>
 			{#if field.type === SettingsFieldType.INPUT}
 				{@const currentValue = String(localConfig[field.key] ?? '')}

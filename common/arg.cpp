@@ -2528,7 +2528,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     params.kv_swap_ram = (size_t) (std::stoull(s) * mul);
                 }
             } catch (const std::exception &) {
-                params.kv_swap_ram = 10 * 1024 * 1024;
+                params.kv_swap_ram = SIZE_MAX;
             }
         }
     ).set_env("LLAMA_ARG_KV_SWAP_RAM"));

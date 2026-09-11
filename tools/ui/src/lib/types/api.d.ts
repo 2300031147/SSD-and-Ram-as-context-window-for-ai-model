@@ -263,6 +263,9 @@ export interface ApiLlamaCppServerProps {
 	webui_settings?: Record<string, string | number | boolean>;
 	ui_settings?: Record<string, string | number | boolean>;
 	cors_proxy_enabled?: boolean;
+	has_discrete_gpu?: boolean;
+	model_size_gb?: number;
+	total_system_ram_gb?: number;
 }
 
 export interface ApiChatCompletionRequest {

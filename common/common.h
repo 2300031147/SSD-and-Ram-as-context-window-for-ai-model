@@ -581,7 +581,7 @@ struct common_params {
     std::string kv_swap_path = "";          // path to SSD swap file (empty = disabled)
     std::string kv_swap_drive = "";         // specific SSD drive/mount path to use (e.g. /mnt/nvme, D:\)
     size_t      kv_swap_size = 0;           // max swap size in bytes (e.g. 16GB, 32GB)
-    size_t      kv_swap_ram  = 10 * 1024 * 1024; // max RAM limit for WARM_RAM tier in bytes (default 10MB)
+    size_t      kv_swap_ram  = SIZE_MAX; // max RAM limit for WARM_RAM tier in bytes (default SIZE_MAX for auto)
     uint32_t    kv_swap_block_size = 32;    // deprecated
     int32_t     kv_swap_engine = 1;         // deprecated
     int32_t     turboquant_k = 0;           // deprecated
