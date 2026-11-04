@@ -4098,6 +4098,9 @@ bool llama_validate_kv_swap_drive(const char * drive_path, size_t required_bytes
     if (!drive_path) return false;
     std::string resolved;
     bool ok = llama_kv_validate_drive(std::string(drive_path), required_bytes, resolved);
+    if (ok && resolved.size() >= max_len) {
+        return false; // must not silently truncate: wrong path means wrong drive
+    }
     if (ok && out_resolved_path && max_len > 0) {
         std::strncpy(out_resolved_path, resolved.c_str(), max_len - 1);
         out_resolved_path[max_len - 1] = '\0';

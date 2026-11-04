@@ -46,8 +46,6 @@
 #include <io.h>
 #elif defined(__APPLE__)
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/sysctl.h>
 #else
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -1320,17 +1318,21 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 #if defined(__linux__)
         long pages = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf(_SC_PAGE_SIZE);
-        total_ram_bytes = (uint64_t)pages * (uint64_t)page_size;
+        if (pages > 0 && page_size > 0) {
+            total_ram_bytes = (uint64_t)pages * (uint64_t)page_size;
+        }
 #elif defined(__APPLE__)
         int64_t memsize = 0;
         size_t len = sizeof(memsize);
-        sysctlbyname("hw.memsize", &memsize, &len, NULL, 0);
-        total_ram_bytes = (uint64_t)memsize;
+        if (sysctlbyname("hw.memsize", &memsize, &len, NULL, 0) == 0 && memsize > 0) {
+            total_ram_bytes = (uint64_t)memsize;
+        }
 #elif defined(_WIN32)
-        MEMORYSTATUSEX statex;
+        MEMORYSTATUSEX statex = {};
         statex.dwLength = sizeof(statex);
-        GlobalMemoryStatusEx(&statex);
-        total_ram_bytes = statex.ullTotalPhys;
+        if (GlobalMemoryStatusEx(&statex)) {
+            total_ram_bytes = statex.ullTotalPhys;
+        }
 #endif
         if (total_ram_bytes > 0) {
             uint64_t model_size = llama_model_size(model);
@@ -1338,9 +1340,12 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             
             // If we are offloading to a discrete GPU (non-Apple with n_gpu_layers > 0),
             // the model resides largely in VRAM, not system RAM.
+            // -1 (auto) keeps the conservative full-RAM estimate.
             uint64_t ram_consumed_by_model = model_size;
 #if !defined(__APPLE__)
-            if (params.n_gpu_layers > 0) {
+            if (params.n_gpu_layers <= -2) {
+                ram_consumed_by_model = 0; // all layers in VRAM
+            } else if (params.n_gpu_layers > 0) {
                 int32_t n_layer = llama_model_n_layer(model);
                 if (n_layer > 0) {
                     double vram_fraction = (double)std::min(params.n_gpu_layers, n_layer) / n_layer;
@@ -1358,9 +1363,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             if (params.kv_swap_ram > safe_ram) {
                 if (params.kv_swap_ram != SIZE_MAX) {
                     COM_WRN("Requested KV RAM swap (%" PRIu64 " bytes) exceeds safe available memory (Total: %" PRIu64 ", Model in RAM: %" PRIu64 "). Capping to %" PRIu64 " bytes.\n",
-                            params.kv_swap_ram, total_ram_bytes, ram_consumed_by_model, safe_ram);
+                            (uint64_t) params.kv_swap_ram, total_ram_bytes, ram_consumed_by_model, safe_ram);
                 }
-                params.kv_swap_ram = safe_ram;
+                params.kv_swap_ram = (size_t) safe_ram;
             }
         } else if (params.kv_swap_ram == SIZE_MAX) {
             // Unknown OS or failed to get RAM, fallback to safe 10MB
@@ -1380,11 +1385,21 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             std::string arch = buf;
             std::string key_embd = arch + ".embedding_length";
             std::string key_head = arch + ".attention.head_count";
-            if (llama_model_meta_val_str(model, key_embd.c_str(), buf, sizeof(buf)) >= 0) {
-                n_embd = std::stoi(buf);
-            }
-            if (llama_model_meta_val_str(model, key_head.c_str(), buf, sizeof(buf)) >= 0) {
-                n_head = std::stoi(buf);
+            try {
+                if (llama_model_meta_val_str(model, key_embd.c_str(), buf, sizeof(buf)) >= 0) {
+                    const int v = std::stoi(buf);
+                    if (v > 0) {
+                        n_embd = v;
+                    }
+                }
+                if (llama_model_meta_val_str(model, key_head.c_str(), buf, sizeof(buf)) >= 0) {
+                    const int v = std::stoi(buf);
+                    if (v > 0) {
+                        n_head = v;
+                    }
+                }
+            } catch (const std::exception &) {
+                // keep defaults on malformed metadata
             }
         }
         
@@ -1480,12 +1495,14 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     pimpl->context.reset(lctx);
 
     std::string swap_target;
+    bool swap_failed = false;
     if (!params.kv_swap_drive.empty()) {
         char resolved_path_buf[1024] = {0};
         if (llama_validate_kv_swap_drive(params.kv_swap_drive.c_str(), params.kv_swap_size, resolved_path_buf, sizeof(resolved_path_buf))) {
             swap_target = resolved_path_buf;
         } else {
             COM_ERR("failed to validate SSD swap drive '%s'\n", params.kv_swap_drive.c_str());
+            swap_failed = true;
         }
     } else if (!params.kv_swap_path.empty()) {
         swap_target = params.kv_swap_path;
@@ -1496,7 +1513,7 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             const bool use_tq = (params.turboquant_k >= 0 && params.turboquant_v >= 0);
             const int tq_k = params.turboquant_k > 0 ? params.turboquant_k : 4;
             const int tq_v = params.turboquant_v > 0 ? params.turboquant_v : 2;
-            llama_memory_enable_ssd_swap(
+            const bool swap_ok = llama_memory_enable_ssd_swap(
                 mem,
                 swap_target.c_str(),
                 params.kv_swap_size,
@@ -1507,9 +1524,21 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
                 tq_v,
                 use_tq
             );
-            COM_INF("SSD secondary KV cache enabled: drive/path='%s', size=%zu MB, ram_size=%zu MB, block_size=%u, engine=%d, tq_k=%d, tq_v=%d\n",
-                swap_target.c_str(), params.kv_swap_size / (1024*1024), params.kv_swap_ram / (1024*1024), params.kv_swap_block_size, params.kv_swap_engine, tq_k, tq_v);
+            if (swap_ok) {
+                COM_INF("SSD secondary KV cache enabled: drive/path='%s', size=%zu MB, ram_size=%zu MB, block_size=%u, engine=%d, tq_k=%d, tq_v=%d\n",
+                    swap_target.c_str(), params.kv_swap_size / (1024*1024), params.kv_swap_ram / (1024*1024), params.kv_swap_block_size, params.kv_swap_engine, tq_k, tq_v);
+            } else {
+                COM_ERR("failed to enable SSD secondary KV cache on '%s'\n", swap_target.c_str());
+                swap_failed = true;
+            }
         }
+    }
+    if (swap_failed) {
+        // run without swap: stale params would make the server believe swap is active
+        params.kv_swap_drive.clear();
+        params.kv_swap_path.clear();
+        params.kv_swap_size = 0;
+        params.kv_swap_ram = 0;
     }
 
     set_process_priority(params.cpuparams.priority);

@@ -394,7 +394,8 @@ class SettingsStore {
 						enabled: true,
 						drive: drive,
 						size_gb: sizeGB,
-						ram_mb: ramSizeGB * 1024,
+						// omit when empty so the server applies its auto value (0 would disable the tier)
+						ram_mb: ramSizeGB > 0 ? ramSizeGB * 1024 : undefined,
 						turboquant_k: turboK,
 						turboquant_v: turboV
 					})

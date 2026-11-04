@@ -208,49 +208,45 @@ export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
 				key: SETTINGS_KEYS.KV_SWAP_DRIVE,
 				label: 'Selected SSD Storage Drive',
 				options: [
-					{ label: 'Select Drive...', value: '' },
-					{ label: 'BG6 KIOXIA 1024GB NVMe SSD (/mnt/data - 953.9 GB)', value: '/mnt/data' },
-					{ label: 'GIGABYTE AG450E500G-G NVMe SSD (/ - 463.8 GB)', value: '/' },
-					{ label: 'Dedicated NVMe Secondary Mount (/mnt/nvme)', value: '/mnt/nvme' },
-					{ label: 'External High-Speed USB/NVMe SSD (/media/ssd)', value: '/media/ssd' }
+					{ label: 'Select Drive...', value: '' }
 				],
 				type: SettingsFieldType.SELECT
 			},
 			{
-				defaultValue: 16,
+				defaultValue: '16',
 				dependsOn: SETTINGS_KEYS.KV_SWAP_ENABLED,
 				help: 'Maximum RAM limit for WARM_RAM tier in Gigabytes (GB). Acts as an intermediary cache between VRAM and SSD.',
 				key: SETTINGS_KEYS.KV_SWAP_RAM_SIZE_GB,
 				label: 'Secondary RAM Cache Capacity (GB)',
 				options: [
-					{ label: '1 GB', value: 1 },
-					{ label: '2 GB', value: 2 },
-					{ label: '4 GB', value: 4 },
-					{ label: '8 GB', value: 8 },
-					{ label: '16 GB', value: 16 },
-					{ label: '32 GB', value: 32 },
-					{ label: '64 GB', value: 64 },
-					{ label: '128 GB', value: 128 },
-					{ label: '256 GB', value: 256 }
+					{ label: '1 GB', value: '1' },
+					{ label: '2 GB', value: '2' },
+					{ label: '4 GB', value: '4' },
+					{ label: '8 GB', value: '8' },
+					{ label: '16 GB', value: '16' },
+					{ label: '32 GB', value: '32' },
+					{ label: '64 GB', value: '64' },
+					{ label: '128 GB', value: '128' },
+					{ label: '256 GB', value: '256' }
 				],
 				type: SettingsFieldType.SELECT
 			},
 			{
-				defaultValue: 64,
+				defaultValue: '64',
 				dependsOn: SETTINGS_KEYS.KV_SWAP_ENABLED,
 				help: 'Maximum storage allocation on the selected SSD drive in Gigabytes (GB). Older context blocks will overflow here when VRAM is full.',
 				key: SETTINGS_KEYS.KV_SWAP_SIZE_GB,
 				label: 'Secondary SSD Cache Capacity (GB)',
 				options: [
-					{ label: '8 GB', value: 8 },
-					{ label: '16 GB', value: 16 },
-					{ label: '32 GB', value: 32 },
-					{ label: '64 GB', value: 64 },
-					{ label: '128 GB', value: 128 },
-					{ label: '256 GB', value: 256 },
-					{ label: '512 GB', value: 512 },
-					{ label: '1024 GB (1 TB)', value: 1024 },
-					{ label: '2048 GB (2 TB)', value: 2048 }
+					{ label: '8 GB', value: '8' },
+					{ label: '16 GB', value: '16' },
+					{ label: '32 GB', value: '32' },
+					{ label: '64 GB', value: '64' },
+					{ label: '128 GB', value: '128' },
+					{ label: '256 GB', value: '256' },
+					{ label: '512 GB', value: '512' },
+					{ label: '1024 GB (1 TB)', value: '1024' },
+					{ label: '2048 GB (2 TB)', value: '2048' }
 				],
 				type: SettingsFieldType.SELECT
 			},

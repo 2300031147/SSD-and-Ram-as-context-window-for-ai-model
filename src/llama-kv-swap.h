@@ -115,6 +115,7 @@ struct llama_kv_block_signature {
 
 struct llama_kv_block_meta {
     llama_kv_block_id   id;
+    bool                trusted = true; // false for entries loaded from a previous session (content-match only)
     llama_kv_block_loc  loc = llama_kv_block_loc::HOT_VRAM;
     uint32_t            cell_start = 0; // cell index in llama_kv_cells
     uint64_t            swap_slot = 0;  // slot index in swap file
@@ -146,6 +147,7 @@ public:
     void    flush();
 
     size_t get_block_bytes() const { return block_bytes; }
+    size_t get_max_swap_size() const { return max_swap_size; }
     size_t get_total_slots() const { return n_slots; }
     size_t get_used_slots() const { return used_slots; }
     llama_kv_swap_engine get_engine() const { return engine; }
@@ -161,6 +163,7 @@ public:
 private:
     std::string path;
     size_t block_bytes = 0;
+    size_t max_swap_size = 0;
     size_t n_slots = 0;
     size_t used_slots = 0;
     llama_kv_swap_engine engine = llama_kv_swap_engine::POSIX_ALIGNED;
@@ -229,6 +232,15 @@ public:
     bool is_turboquant_active() const { return use_turboquant; }
     llama_tq_mode get_tq_mode_k() const { return tq_mode_k; }
     llama_tq_mode get_tq_mode_v() const { return tq_mode_v; }
+    bool matches_config(
+            const std::string & swap_path,
+            size_t max_swap_size,
+            size_t max_ram_size,
+            uint32_t block_size,
+            llama_kv_swap_engine engine,
+            llama_tq_mode tq_mode_k,
+            llama_tq_mode tq_mode_v,
+            bool use_turboquant) const;
 
     // Register active block in VRAM/RAM with token content for indexing
     void register_block_tokens(
@@ -336,5 +348,6 @@ private:
     size_t calculate_block_bytes() const;
     void allocate_staging_buffer();
     void free_staging_buffer();
+    void remove_block_if_exists(const llama_kv_block_id & id);
 };
 

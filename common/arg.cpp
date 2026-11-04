@@ -2495,13 +2495,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     params.kv_swap_size = (size_t) (std::stoull(s) * mul);
                 }
             } catch (const std::exception &) {
+                fprintf(stderr, "warn: invalid value for --kv-swap-size '%s', disabling SSD swap\n", value.c_str());
                 params.kv_swap_size = 0;
             }
         }
     ).set_env("LLAMA_ARG_KV_SWAP_SIZE"));
     add_opt(common_arg(
         {"-ksr", "--kv-swap-ram"}, "SIZE",
-        "maximum RAM limit for WARM_RAM tier (e.g. 1G, 512M, 10240K) (default: 10M)",
+        "maximum RAM limit for WARM_RAM tier (e.g. 1G, 512M, 10240K) (default: auto)",
         [](common_params & params, const std::string & value) {
             size_t mul = 1024 * 1024;
             std::string s = value;
@@ -2528,7 +2529,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     params.kv_swap_ram = (size_t) (std::stoull(s) * mul);
                 }
             } catch (const std::exception &) {
-                params.kv_swap_ram = SIZE_MAX;
+                fprintf(stderr, "warn: invalid value for --kv-swap-ram '%s', falling back to 10M\n", value.c_str());
+                params.kv_swap_ram = 10 * 1024 * 1024;
             }
         }
     ).set_env("LLAMA_ARG_KV_SWAP_RAM"));
@@ -2543,6 +2545,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             } else if (value == "turbo2" || value == "2") {
                 params.turboquant_k = 2;
             } else {
+                if (value != "none") {
+                    fprintf(stderr, "warn: invalid value for --turboquant-k '%s', disabling TurboQuant\n", value.c_str());
+                }
                 params.turboquant_k = -1;
             }
         }
@@ -2558,6 +2563,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             } else if (value == "turbo2" || value == "2") {
                 params.turboquant_v = 2;
             } else {
+                if (value != "none") {
+                    fprintf(stderr, "warn: invalid value for --turboquant-v '%s', disabling TurboQuant\n", value.c_str());
+                }
                 params.turboquant_v = -1;
             }
         }

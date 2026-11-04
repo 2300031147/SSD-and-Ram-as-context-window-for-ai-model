@@ -2681,21 +2681,8 @@ private:
                             );
                         }
                     } else {
-                        params_base.kv_swap_drive = task.kv_swap_action.drive;
-                        params_base.kv_swap_path = task.kv_swap_action.resolved_path;
-                        params_base.kv_swap_size = task.kv_swap_action.required_bytes;
-                        params_base.kv_swap_ram = task.kv_swap_action.max_ram_size;
-                        params_base.no_kv_offload = true;
-                        
-                        res->drive = task.kv_swap_action.drive;
-                        res->resolved_path = task.kv_swap_action.resolved_path;
-                        res->size_gb = task.kv_swap_action.size_gb;
-                        res->tq_k_str = task.kv_swap_action.tq_k_str;
-                        res->tq_v_str = task.kv_swap_action.tq_v_str;
-                        res->use_tq = task.kv_swap_action.use_tq;
-                        
                         if (ctx_tgt) {
-                            llama_memory_enable_ssd_swap(
+                            const bool swap_ok = llama_memory_enable_ssd_swap(
                                 llama_get_memory(ctx_tgt),
                                 task.kv_swap_action.resolved_path.c_str(),
                                 task.kv_swap_action.required_bytes,
@@ -2706,7 +2693,28 @@ private:
                                 task.kv_swap_action.tq_v,
                                 task.kv_swap_action.use_tq
                             );
+                            if (!swap_ok) {
+                                auto res_err = std::make_unique<server_task_result_error>();
+                                res_err->id = task.id;
+                                res_err->err_type = ERROR_TYPE_SERVER;
+                                res_err->err_msg = "failed to enable SSD swap on the running model";
+                                queue_results.send(std::move(res_err));
+                                break;
+                            }
                         }
+
+                        params_base.kv_swap_drive = task.kv_swap_action.drive;
+                        params_base.kv_swap_path = task.kv_swap_action.resolved_path;
+                        params_base.kv_swap_size = task.kv_swap_action.required_bytes;
+                        params_base.kv_swap_ram = task.kv_swap_action.max_ram_size;
+                        params_base.no_kv_offload = true;
+
+                        res->drive = task.kv_swap_action.drive;
+                        res->resolved_path = task.kv_swap_action.resolved_path;
+                        res->size_gb = task.kv_swap_action.size_gb;
+                        res->tq_k_str = task.kv_swap_action.tq_k_str;
+                        res->tq_v_str = task.kv_swap_action.tq_v_str;
+                        res->use_tq = task.kv_swap_action.use_tq;
                     }
                     
                     // Trigger a reload if we are in single-model mode
@@ -4661,8 +4669,9 @@ static json get_res_props(const server_context_meta & meta, const common_params 
     // system memory info for unified RAM safety
     props["model_size_gb"] = (double) meta.model_size / (1024.0 * 1024.0 * 1024.0);
 
-    // detect discrete GPU
+    // Apple GPUs share unified memory, so never discrete
     bool has_dgpu = false;
+#if !defined(__APPLE__)
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
@@ -4670,23 +4679,31 @@ static json get_res_props(const server_context_meta & meta, const common_params 
             break;
         }
     }
+#endif
     props["has_discrete_gpu"] = has_dgpu;
 
     // total system RAM
 #if defined(__linux__)
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
-    double total_ram_gb = ((double)pages * (double)page_size) / (1024.0 * 1024.0 * 1024.0);
+    double total_ram_gb = 0.0;
+    if (pages > 0 && page_size > 0) {
+        total_ram_gb = ((double)pages * (double)page_size) / (1024.0 * 1024.0 * 1024.0);
+    }
 #elif defined(__APPLE__)
     int64_t memsize = 0;
     size_t len = sizeof(memsize);
-    sysctlbyname("hw.memsize", &memsize, &len, NULL, 0);
-    double total_ram_gb = (double)memsize / (1024.0 * 1024.0 * 1024.0);
+    double total_ram_gb = 0.0;
+    if (sysctlbyname("hw.memsize", &memsize, &len, NULL, 0) == 0 && memsize > 0) {
+        total_ram_gb = (double)memsize / (1024.0 * 1024.0 * 1024.0);
+    }
 #elif defined(_WIN32)
-    MEMORYSTATUSEX statex;
+    MEMORYSTATUSEX statex = {};
     statex.dwLength = sizeof(statex);
-    GlobalMemoryStatusEx(&statex);
-    double total_ram_gb = (double)statex.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+    double total_ram_gb = 0.0;
+    if (GlobalMemoryStatusEx(&statex)) {
+        total_ram_gb = (double)statex.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+    }
 #else
     double total_ram_gb = 0.0;
 #endif
@@ -4936,7 +4953,12 @@ void server_routes::init_routes() {
             }
 
             char resolved_path_buf[1024] = {0};
-            const size_t required_bytes = (size_t)(size_gb * 1024.0 * 1024.0 * 1024.0);
+            const double size_bytes = size_gb * 1024.0 * 1024.0 * 1024.0;
+            if (!std::isfinite(size_bytes) || size_bytes <= 0.0 || size_bytes >= (double) SIZE_MAX) {
+                res->error(format_error_response("size_gb must be a positive finite number", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+            const size_t required_bytes = (size_t) size_bytes;
             if (!llama_validate_kv_swap_drive(drive.c_str(), required_bytes, resolved_path_buf, sizeof(resolved_path_buf))) {
                 res->error(format_error_response("Selected drive is invalid or lacks sufficient space", ERROR_TYPE_INVALID_REQUEST));
                 return res;
@@ -4957,7 +4979,12 @@ void server_routes::init_routes() {
 
             bool use_tq = (tq_k_str != "none" && tq_v_str != "none");
             double ram_mb = data.value("ram_mb", (double)this->ctx_server.params_base.kv_swap_ram / (1024.0 * 1024.0));
-            size_t max_ram_size = (size_t)(ram_mb * 1024.0 * 1024.0);
+            const double ram_bytes = ram_mb * 1024.0 * 1024.0;
+            if (!std::isfinite(ram_bytes) || ram_bytes < 0.0 || ram_bytes >= (double) SIZE_MAX) {
+                res->error(format_error_response("ram_mb must be a non-negative finite number", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+            size_t max_ram_size = (size_t) ram_bytes;
 
             auto & rd = res->rd;
             {

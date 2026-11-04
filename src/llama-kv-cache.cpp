@@ -2892,6 +2892,10 @@ void llama_kv_cache::enable_ssd_swap(
         llama_tq_mode tq_mode_v,
         bool use_turboquant) {
 
+    if (swap_mgr && swap_mgr->matches_config(swap_path, max_swap_size, max_ram_size, block_size, engine, tq_mode_k, tq_mode_v, use_turboquant)) {
+        return; // already enabled with identical settings; keep live tracking intact
+    }
+
     swap_mgr = std::make_unique<llama_kv_tiered_manager>(
         swap_path,
         max_swap_size,

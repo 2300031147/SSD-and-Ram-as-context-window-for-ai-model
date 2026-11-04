@@ -28,6 +28,7 @@
     #include <sys/param.h>
     #include <sys/ucred.h>
     #include <sys/mount.h>
+    #include <sys/statvfs.h>
 #else
     #include <unistd.h>
     #include <fcntl.h>
@@ -54,7 +55,7 @@ static std::string get_windows_device_model(const char * drive_letter) {
 static bool check_windows_is_ssd(const char * drive_letter) {
     return true;
 }
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__)
 #include <sys/statvfs.h>
 #include <mntent.h>
 
@@ -158,7 +159,7 @@ std::vector<llama_drive_info> llama_kv_get_available_drives() {
             p += strlen(p) + 1;
         }
     }
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__)
     FILE * mtab = setmntent("/proc/mounts", "r");
     if (mtab) {
         struct mntent * ent;
@@ -199,7 +200,28 @@ std::vector<llama_drive_info> llama_kv_get_available_drives() {
         }
         endmntent(mtab);
     }
-
+#elif defined(__APPLE__)
+    struct statfs * mounts = nullptr;
+    const int n_mounts = getmntinfo(&mounts, MNT_WAIT);
+    for (int i = 0; i < n_mounts; ++i) {
+        if (strncmp(mounts[i].f_mntfromname, "/dev/", 5) != 0) {
+            continue;
+        }
+        struct statvfs vfs;
+        if (statvfs(mounts[i].f_mntonname, &vfs) == 0 && vfs.f_blocks > 0) {
+            llama_drive_info info;
+            info.path = mounts[i].f_mntonname;
+            info.device_node = mounts[i].f_mntfromname;
+            info.fs_type = mounts[i].f_fstypename;
+            info.total_bytes = (uint64_t) vfs.f_blocks * vfs.f_frsize;
+            info.free_bytes = (uint64_t) vfs.f_bavail * vfs.f_frsize;
+            info.is_ssd = true; // macs ship flash storage
+            info.device_name = mounts[i].f_mntfromname;
+            drives.push_back(info);
+        }
+    }
+#endif
+#if defined(__linux__) || defined(__APPLE__)
     if (drives.empty()) {
         struct statvfs vfs;
         if (statvfs("/tmp", &vfs) == 0) {
@@ -293,7 +315,7 @@ llama_kv_swap_store::llama_kv_swap_store(
         size_t max_swap_size,
         size_t block_bytes,
         llama_kv_swap_engine engine)
-    : path(path), block_bytes(block_bytes), engine(engine) {
+    : path(path), block_bytes(block_bytes), max_swap_size(max_swap_size), engine(engine) {
     if (block_bytes == 0) {
         throw std::runtime_error("swap block size cannot be 0");
     }
@@ -601,6 +623,26 @@ void llama_kv_block_index::div_seq(llama_seq_id seq_id, llama_pos p0, llama_pos 
 // llama_kv_tiered_manager
 //
 
+bool llama_kv_tiered_manager::matches_config(
+        const std::string & swap_path,
+        size_t max_swap_size,
+        size_t max_ram_size,
+        uint32_t block_size,
+        llama_kv_swap_engine engine,
+        llama_tq_mode tq_mode_k,
+        llama_tq_mode tq_mode_v,
+        bool use_turboquant) const {
+    return store
+        && store->get_path() == swap_path
+        && store->get_max_swap_size() == max_swap_size
+        && max_ram_bytes == max_ram_size
+        && this->block_size == block_size
+        && store->get_engine() == engine
+        && this->tq_mode_k == tq_mode_k
+        && this->tq_mode_v == tq_mode_v
+        && this->use_turboquant == use_turboquant;
+}
+
 llama_kv_tiered_manager::llama_kv_tiered_manager(
         const std::string & swap_path,
         size_t max_swap_size,
@@ -625,6 +667,18 @@ llama_kv_tiered_manager::llama_kv_tiered_manager(
         tq_mode_k(tq_mode_k),
         tq_mode_v(tq_mode_v),
         use_turboquant(use_turboquant) {
+
+    if (block_size == 0 || (kv_size > 0 && block_size > kv_size)) {
+        throw std::runtime_error("swap block size must be within (0, kv cache size]");
+    }
+
+    if (use_turboquant) {
+        const bool valid_k = tq_mode_k == llama_tq_mode::TURBO2 || tq_mode_k == llama_tq_mode::TURBO3 || tq_mode_k == llama_tq_mode::TURBO4;
+        const bool valid_v = tq_mode_v == llama_tq_mode::TURBO2 || tq_mode_v == llama_tq_mode::TURBO3 || tq_mode_v == llama_tq_mode::TURBO4;
+        if (!valid_k || !valid_v) {
+            throw std::runtime_error("invalid TurboQuant mode (expected 2, 3 or 4)");
+        }
+    }
 
     block_bytes = calculate_block_bytes();
 
@@ -876,6 +930,7 @@ void llama_kv_tiered_manager::register_block_tokens(
                     it->second.loc = llama_kv_block_loc::HOT_VRAM;
                     it->second.access_ts = ++current_ts;
                     it->second.dirty = true;
+                    it->second.trusted = true; // range fully redescribed by live data
                 }
 
                 auto lru_it = lru_map.find(id);
@@ -1178,9 +1233,6 @@ bool llama_kv_tiered_manager::evict_lru_block(
         warm_ram_map[meta.id] = warm_ram_list.begin();
     } else {
         // RAM is full, evict oldest WARM_RAM block to COLD_SSD first
-        if (!store) {
-            return false; // No SSD tier available to evict to
-        }
         if (!warm_ram_list.empty()) {
             auto warm_it = warm_ram_list.back();
             auto & warm_meta = blocks[warm_it];
@@ -1287,6 +1339,9 @@ std::vector<llama_kv_block_id> llama_kv_tiered_manager::get_recallable_blocks(
     // Find all COLD_SSD blocks for the current sequence to restore context
     std::vector<llama_kv_block_id> seq_cold_blocks;
     for (const auto & pair : blocks) {
+        if (!pair.second.trusted) {
+            continue; // previous session: content-match only, never positional
+        }
         if (pair.first.seq_id == seq_id && (pair.second.loc == llama_kv_block_loc::COLD_SSD || pair.second.loc == llama_kv_block_loc::WARM_RAM)) {
             seq_cold_blocks.push_back(pair.first);
         }
@@ -1576,6 +1631,33 @@ void llama_kv_tiered_manager::remove_seq(llama_seq_id seq_id, llama_pos p0, llam
     }
 }
 
+void llama_kv_tiered_manager::remove_block_if_exists(const llama_kv_block_id & id) {
+    auto it = blocks.find(id);
+    if (it == blocks.end()) {
+        return;
+    }
+    if (it->second.loc == llama_kv_block_loc::WARM_RAM && it->second.ram_ptr) {
+        llama_kv_swap_aligned_free(it->second.ram_ptr);
+        it->second.ram_ptr = nullptr;
+        used_ram_bytes -= block_bytes;
+    } else if (it->second.loc == llama_kv_block_loc::COLD_SSD) {
+        store->free_slot(it->second.swap_slot);
+    }
+    auto warm_it = warm_ram_map.find(id);
+    if (warm_it != warm_ram_map.end()) {
+        warm_ram_list.erase(warm_it->second);
+        warm_ram_map.erase(warm_it);
+    }
+    auto lru_it = lru_map.find(id);
+    if (lru_it != lru_map.end()) {
+        lru_list.erase(lru_it->second);
+        lru_map.erase(lru_it);
+    }
+    // erase the entry too: overwriting it would keep the stale key n_tokens,
+    // while fracture math and save_state use key and value ids interchangeably
+    blocks.erase(it);
+}
+
 void llama_kv_tiered_manager::shift_seq(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     seq_active_block.erase(seq_id);
@@ -1636,25 +1718,7 @@ void llama_kv_tiered_manager::shift_seq(llama_seq_id seq_id, llama_pos p0, llama
 
     for (auto & meta : to_shift) {
         meta.id.pos_start += delta;
-        
-        auto it = blocks.find(meta.id);
-        if (it != blocks.end()) {
-            if (it->second.loc == llama_kv_block_loc::WARM_RAM && it->second.ram_ptr) {
-                llama_kv_swap_aligned_free(it->second.ram_ptr);
-                used_ram_bytes -= block_bytes;
-            } else if (it->second.loc == llama_kv_block_loc::COLD_SSD) {
-                if (store) store->free_slot(it->second.swap_slot);
-            }
-            if (warm_ram_map.find(meta.id) != warm_ram_map.end()) {
-                warm_ram_list.erase(warm_ram_map[meta.id]);
-                warm_ram_map.erase(meta.id);
-            }
-            if (lru_map.find(meta.id) != lru_map.end()) {
-                lru_list.erase(lru_map[meta.id]);
-                lru_map.erase(meta.id);
-            }
-        }
-        
+        remove_block_if_exists(meta.id);
         blocks[meta.id] = meta;
         if (meta.loc == llama_kv_block_loc::HOT_VRAM) {
             lru_list.push_front(meta.id);
@@ -1728,25 +1792,7 @@ void llama_kv_tiered_manager::div_seq(llama_seq_id seq_id, llama_pos p0, llama_p
 
     for (auto & meta : to_div) {
         meta.id.pos_start /= d;
-        
-        auto it = blocks.find(meta.id);
-        if (it != blocks.end()) {
-            if (it->second.loc == llama_kv_block_loc::WARM_RAM && it->second.ram_ptr) {
-                llama_kv_swap_aligned_free(it->second.ram_ptr);
-                used_ram_bytes -= block_bytes;
-            } else if (it->second.loc == llama_kv_block_loc::COLD_SSD) {
-                if (store) store->free_slot(it->second.swap_slot);
-            }
-            if (warm_ram_map.find(meta.id) != warm_ram_map.end()) {
-                warm_ram_list.erase(warm_ram_map[meta.id]);
-                warm_ram_map.erase(meta.id);
-            }
-            if (lru_map.find(meta.id) != lru_map.end()) {
-                lru_list.erase(lru_map[meta.id]);
-                lru_map.erase(meta.id);
-            }
-        }
-        
+        remove_block_if_exists(meta.id);
         blocks[meta.id] = meta;
         if (meta.loc == llama_kv_block_loc::HOT_VRAM) {
             lru_list.push_front(meta.id);
@@ -1762,10 +1808,13 @@ void llama_kv_tiered_manager::cp_seq(llama_seq_id seq_id_src, llama_seq_id seq_i
     std::lock_guard<std::recursive_mutex> lock(mutex);
     seq_active_block.erase(seq_id_dst);
 
-    // preserve active block tracking from src
+    // preserve active block tracking from src, retargeted at dst so later
+    // appends coalesce into dst's own copied block instead of src's
     auto active_it = seq_active_block.find(seq_id_src);
     if (active_it != seq_active_block.end()) {
-        seq_active_block[seq_id_dst] = active_it->second;
+        llama_kv_block_id dst_active = active_it->second;
+        dst_active.seq_id = seq_id_dst;
+        seq_active_block[seq_id_dst] = dst_active;
     }
 
     if (p1 < 0) {
@@ -1817,9 +1866,6 @@ void llama_kv_tiered_manager::cp_seq(llama_seq_id seq_id_src, llama_seq_id seq_i
                         }
                     } else {
                         // WARM_RAM is full, fallback to duplicating into COLD_SSD
-                        if (!store) {
-                            continue; // No SSD tier available
-                        }
                         int64_t new_slot = store->alloc_slot();
                         if (new_slot >= 0) {
                             if (store->write_block(new_slot, meta.ram_ptr, block_bytes)) {
@@ -1842,24 +1888,7 @@ void llama_kv_tiered_manager::cp_seq(llama_seq_id seq_id_src, llama_seq_id seq_i
     }
     
     for (const auto & meta : to_add) {
-        auto it = blocks.find(meta.id);
-        if (it != blocks.end()) {
-            if (it->second.loc == llama_kv_block_loc::WARM_RAM && it->second.ram_ptr) {
-                llama_kv_swap_aligned_free(it->second.ram_ptr);
-                used_ram_bytes -= block_bytes;
-            } else if (it->second.loc == llama_kv_block_loc::COLD_SSD) {
-                if (store) store->free_slot(it->second.swap_slot);
-            }
-            if (warm_ram_map.find(meta.id) != warm_ram_map.end()) {
-                warm_ram_list.erase(warm_ram_map[meta.id]);
-                warm_ram_map.erase(meta.id);
-            }
-            if (lru_map.find(meta.id) != lru_map.end()) {
-                lru_list.erase(lru_map[meta.id]);
-                lru_map.erase(meta.id);
-            }
-        }
-        
+        remove_block_if_exists(meta.id);
         blocks[meta.id] = meta;
         if (meta.loc == llama_kv_block_loc::HOT_VRAM) {
             lru_list.push_front(meta.id);
@@ -1995,6 +2024,17 @@ bool llama_kv_tiered_manager::load_state(const std::string & meta_path) {
     if (!store) return false;
     std::lock_guard<std::recursive_mutex> lock(mutex);
 
+    // refuse state when the swap file was modified after the metadata was saved:
+    // that means an unclean shutdown, and slot contents no longer match the index
+    {
+        std::error_code ec_bin, ec_meta;
+        const auto t_bin  = std::filesystem::last_write_time(store->get_path(), ec_bin);
+        const auto t_meta = std::filesystem::last_write_time(meta_path, ec_meta);
+        if (!ec_bin && !ec_meta && t_bin > t_meta) {
+            return false;
+        }
+    }
+
     FILE * fp = fopen(meta_path.c_str(), "rb");
     if (!fp) return false;
 
@@ -2061,11 +2101,25 @@ bool llama_kv_tiered_manager::load_state(const std::string & meta_path) {
             fclose(fp); return false;
         }
 
+        // save_state only writes COLD_SSD entries; anything else means a corrupt file
+        if (id.n_tokens > block_size) {
+            store->free_slot(swap_slot);
+            continue;
+        }
+        if (swap_slot >= bitmap.size() || !bitmap[swap_slot]) {
+            continue;
+        }
+        auto dup = blocks.find(id);
+        if (dup != blocks.end()) {
+            store->free_slot(dup->second.swap_slot);
+            blocks.erase(dup);
+        }
         llama_kv_block_meta meta;
         meta.id = id;
-        meta.loc = loc;
+        meta.loc = llama_kv_block_loc::COLD_SSD;
         meta.swap_slot = swap_slot;
         meta.dirty = false;
+        meta.trusted = false; // previous session: never trust positionally
         blocks[id] = meta;
     }
 
@@ -2088,6 +2142,11 @@ bool llama_kv_tiered_manager::load_state(const std::string & meta_path) {
 
         uint32_t tsize;
         if (fread(&tsize, sizeof(tsize), 1, fp) != 1) {
+            fclose(fp); return false;
+        }
+
+        // signatures hold at most one block of tokens; larger means a corrupt file
+        if (tsize > block_size) {
             fclose(fp); return false;
         }
 

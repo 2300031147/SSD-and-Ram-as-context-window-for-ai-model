@@ -266,6 +266,19 @@ export interface ApiLlamaCppServerProps {
 	has_discrete_gpu?: boolean;
 	model_size_gb?: number;
 	total_system_ram_gb?: number;
+	drives?: ServerDriveInfo[];
+}
+
+export interface ServerDriveInfo {
+	device_name: string;
+	device_node: string;
+	mount_path: string;
+	fs_type: string;
+	total_bytes: number;
+	free_bytes: number;
+	total_gb: number;
+	free_gb: number;
+	is_ssd: boolean;
 }
 
 export interface ApiChatCompletionRequest {

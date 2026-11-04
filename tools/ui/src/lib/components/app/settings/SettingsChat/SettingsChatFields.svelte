@@ -10,6 +10,7 @@
 	import { ICON_CLASS_DEFAULT, SETTING_CONFIG_INFO, SETTINGS_KEYS } from '$lib/constants';
 	import { SettingsFieldType } from '$lib/enums/settings.enums';
 	import { modelsStore, serverStore, settingsStore } from '$lib/stores';
+	import type { ServerDriveInfo } from '$lib/types';
 	import { normalizeFloatingPoint } from '$lib/utils/precision';
 	import type { Component } from 'svelte';
 
@@ -40,6 +41,27 @@
 
 		return (serverStore.defaultParams ?? {}) as Record<string, unknown>;
 	});
+
+	let driveOptions = $derived.by(() => {
+		const drives = serverStore.props?.drives;
+		if (!drives || drives.length === 0) {
+			return undefined;
+		}
+		return [
+			{ label: 'Select Drive...', value: '' },
+			...drives.map((d: ServerDriveInfo) => ({
+				label: `${d.device_name || d.device_node} (${d.mount_path} - ${d.free_gb.toFixed(1)} GB)`,
+				value: d.mount_path
+			}))
+		];
+	});
+
+	function fieldOptionsFor(field: SettingsFieldConfig) {
+		if (field.key === SETTINGS_KEYS.KV_SWAP_DRIVE) {
+			return driveOptions ?? field.options;
+		}
+		return field.options;
+	}
 </script>
 
 {#each fields as field (field.key)}
@@ -157,7 +179,7 @@
 					</div>
 				{/if}
 			{:else if field.type === SettingsFieldType.SELECT}
-				{@const selectedOption = field.options?.find(
+				{@const selectedOption = fieldOptionsFor(field)?.find(
 					(opt: { value: string; label: string; icon?: Component }) =>
 						opt.value === localConfig[field.key]
 				)}
@@ -222,8 +244,8 @@
 						{/if}
 					</div>
 					<Select.Content>
-						{#if field.options}
-							{#each field.options as option (option.value)}
+						{#if fieldOptionsFor(field)}
+							{#each fieldOptionsFor(field) as option (option.value)}
 								<Select.Item value={option.value} label={option.label}>
 									<div class="flex items-center gap-2">
 										{#if option.icon}
